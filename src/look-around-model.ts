@@ -138,3 +138,29 @@ export function lookAroundVerticalRange(mode: LookAroundMode, startMinutes: numb
     ? { startMinutes: -LOOK_AROUND_VERTICAL_BUFFER_MINUTES, endMinutes: 24 * 60 + LOOK_AROUND_VERTICAL_BUFFER_MINUTES }
     : { startMinutes, endMinutes };
 }
+
+/**
+ * First visible minute of a window that is `visibleMinutes` tall and centred on `nowMinutes`.
+ * The window is kept inside the configured start/end range, so the hours outside it are only
+ * reachable by scrolling. A window at least as tall as the range starts at the configured start.
+ */
+export function centeredOriginMinutes(
+  nowMinutes: number,
+  visibleMinutes: number,
+  configuredStartMinutes: number,
+  configuredEndMinutes: number,
+): number {
+  const centred = nowMinutes - visibleMinutes / 2;
+  const latestStart = configuredEndMinutes - visibleMinutes;
+  return Math.max(configuredStartMinutes, Math.min(centred, latestStart));
+}
+
+/** Extra vertical room the card may use below its top edge, never smaller than a usable minimum. */
+export function fitToScreenMaxHeight(
+  screenHeightPx: number,
+  viewportTopPx: number,
+  bottomReservePx: number,
+  minimumPx = 160,
+): number {
+  return Math.max(minimumPx, Math.floor(screenHeightPx - viewportTopPx - bottomReservePx));
+}

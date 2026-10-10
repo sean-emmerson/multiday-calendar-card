@@ -382,6 +382,8 @@ export class MultidayCalendarCardEditor extends HTMLElement {
         <h3>Layout & density</h3>
         <label class="toggle"><input type="checkbox" data-action="fixed-height" ${fixedHeight ? 'checked' : ''}> Use a fixed card height</label>
         <div class="field"><label>Hour height (pixels)</label><input data-config="hour_height" type="number" min="1" step="1" value="${config.hour_height ?? 56}" ${fixedHeight ? 'disabled' : ''}><div class="hint">Timeline height per visible hour. Defaults to 56 pixels when omitted.</div></div>
+        <label class="toggle"><input data-config="fit_to_screen" type="checkbox" ${config.fit_to_screen === true ? 'checked' : ''} ${fixedHeight ? 'disabled' : ''}> Fit to screen and centre on now</label>
+        <div class="field"><label>Screen margin (pixels)</label><input data-config="screen_margin" type="number" min="0" step="1" value="${config.screen_margin ?? 16}" ${fixedHeight ? 'disabled' : ''}><div class="hint">Keeps hour height and crops the card to the space left on screen, centred on the current time. Earlier and later hours stay reachable by scrolling. Margin is the space left free below the card.</div></div>
         <div class="field fixed-height-field"><label>Fixed height (pixels)</label><input data-config="height" type="number" min="1" step="1" value="${fixedHeight ? config.height : ''}" ${fixedHeight ? '' : 'disabled'}><div class="hint">A fixed height compresses the timeline and overrides hour height; it does not hide events.</div></div>
       </section>
       <section class="section">
@@ -417,7 +419,7 @@ export class MultidayCalendarCardEditor extends HTMLElement {
     });
     this.querySelector('[data-action="fixed-height"]')?.addEventListener('change', (event) => {
       const fixed = (event.target as HTMLInputElement).checked;
-      this.updateConfig({ height: fixed ? 480 : null }, true);
+      this.updateConfig(fixed ? { height: 480, fit_to_screen: false } : { height: null }, true);
     });
     this.querySelectorAll<HTMLButtonElement>('[data-action="toggle-skip-day"]').forEach((button) => button.addEventListener('click', () => {
       const day = button.dataset.dayName as DayName;

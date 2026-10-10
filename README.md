@@ -108,6 +108,8 @@ calendars:
 | `custom_nominatim_url` | unset | Optional absolute HTTP(S) URL of a compatible Nominatim endpoint. Used only with `location_map_provider: osm_nominatim`; the public Nominatim endpoint is used when omitted. |
 | `hour_height` | `56` | Timeline height in pixels per visible hour. Used when `height` is omitted. |
 | `height` | unset | Fixed outer-card height in pixels. It takes precedence over `hour_height` and compresses the timeline without hiding events. |
+| `fit_to_screen` | `false` | Keep `hour_height` and crop the card to the space left on screen, centred on the current time. See [Fit to screen](#fit-to-screen). Cannot be combined with `height`. |
+| `screen_margin` | `16` | Pixels to leave free below the card when `fit_to_screen` is on. |
 | `refresh_interval` | `30` | Minutes between calendar refreshes. It must be a positive number. |
 | `look_around.mode` | `none` | Enables scrolling to explore events beyond the configured boundaries. Allowed values: `none`, `horizontal`, `vertical`, and `full`. |
 | `look_around.origin_snap_distance` | `30` | Prevents the calendar from scrolling until the configured amount of scrolling input was registered in pixels. Set `0` to disable origin snapping. |
@@ -159,6 +161,27 @@ height: 480
 calendars:
   - entity: calendar.household
 ```
+
+### Fit to screen
+
+`height` squeezes the whole timeline into the card. On a small tablet that makes events tiny. `fit_to_screen` does the opposite: the timeline keeps its `hour_height`, and the card is cropped to the space between its top edge and the bottom of the screen. The visible window is centred on the current-time line and never reaches outside `start_time` / `end_time` on first view. Everything else is still there: scroll up or down for earlier and later hours.
+
+```
+type: custom:multiday-calendar-card
+days: 2
+start_time: "06:00"
+end_time: "22:00"
+hour_height: 56
+fit_to_screen: true
+screen_margin: 16
+calendars:
+  - entity: calendar.household
+```
+
+- It switches on vertical look-around for you (`horizontal` becomes `full`).
+- While you rest at the starting position the window follows the clock. If you have scrolled elsewhere it stays put, then returns to the new "now" after `look_around.automatic_recenter` seconds or when you tap the recenter button.
+- If the whole configured range fits on screen at `hour_height`, the card is not stretched.
+- The available height is measured when the card loads and when the window size or orientation changes. It assumes the page is scrolled to the top; use `screen_margin` to leave room for anything else below the card.
 
 ## Visual editor
 

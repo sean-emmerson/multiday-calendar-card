@@ -194,3 +194,13 @@ test('validateEditorConfig rejects incomplete calendar and invalid view/density 
     'Maximum simultaneous events must be a positive whole number.',
   ]);
 });
+
+test('fit_to_screen validates its type, its margin and its conflict with a fixed height', () => {
+  const base = { type: 'custom:multiday-calendar-card', calendars: [{ entity: 'calendar.household' }] };
+
+  assert.deepEqual(validateEditorConfig({ ...base, fit_to_screen: true, screen_margin: 24 }), []);
+  assert.deepEqual(validateEditorConfig({ ...base, fit_to_screen: true, height: null }), []);
+  assert.ok(validateEditorConfig({ ...base, fit_to_screen: true, height: 480 }).some((error) => /fixed height/i.test(error)));
+  assert.ok(validateEditorConfig({ ...base, fit_to_screen: 'yes' as unknown as boolean }).some((error) => /true or false/i.test(error)));
+  assert.ok(validateEditorConfig({ ...base, screen_margin: -4 }).some((error) => /screen margin/i.test(error)));
+});

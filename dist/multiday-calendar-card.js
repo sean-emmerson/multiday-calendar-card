@@ -462,6 +462,20 @@ function lookAroundVerticalRange(mode, startMinutes, endMinutes) {
         ? { startMinutes: -LOOK_AROUND_VERTICAL_BUFFER_MINUTES, endMinutes: 24 * 60 + LOOK_AROUND_VERTICAL_BUFFER_MINUTES }
         : { startMinutes, endMinutes };
 }
+/**
+ * First visible minute of a window that is `visibleMinutes` tall and centred on `nowMinutes`.
+ * The window is kept inside the configured start/end range, so the hours outside it are only
+ * reachable by scrolling. A window at least as tall as the range starts at the configured start.
+ */
+function centeredOriginMinutes(nowMinutes, visibleMinutes, configuredStartMinutes, configuredEndMinutes) {
+    const centred = nowMinutes - visibleMinutes / 2;
+    const latestStart = configuredEndMinutes - visibleMinutes;
+    return Math.max(configuredStartMinutes, Math.min(centred, latestStart));
+}
+/** Extra vertical room the card may use below its top edge, never smaller than a usable minimum. */
+function fitToScreenMaxHeight(screenHeightPx, viewportTopPx, bottomReservePx, minimumPx = 160) {
+    return Math.max(minimumPx, Math.floor(screenHeightPx - viewportTopPx - bottomReservePx));
+}
 
 const GRID_INTERVALS = [15, 20, 30, 60, 120];
 function parseTime(value) {
@@ -534,6 +548,15 @@ function validateEditorConfig(config) {
     }
     if (config.max_simultaneous_events !== undefined && (!Number.isInteger(config.max_simultaneous_events) || config.max_simultaneous_events < 1)) {
         errors.push('Maximum simultaneous events must be a positive whole number.');
+    }
+    if (config.fit_to_screen !== undefined && typeof config.fit_to_screen !== 'boolean') {
+        errors.push('Fit to screen must be true or false.');
+    }
+    if (config.fit_to_screen === true && config.height !== undefined && config.height !== null) {
+        errors.push('Fit to screen cannot be combined with a fixed height.');
+    }
+    if (config.screen_margin !== undefined && (!Number.isFinite(config.screen_margin) || config.screen_margin < 0)) {
+        errors.push('Screen margin must be a non-negative number of pixels.');
     }
     errors.push(...validateLookAroundSettings(config.look_around));
     const tapActionError = validateTapAction(config.tap_action);
@@ -1059,6 +1082,8 @@ class MultidayCalendarCardEditor extends HTMLElement {
         <h3>Layout & density</h3>
         <label class="toggle"><input type="checkbox" data-action="fixed-height" ${fixedHeight ? 'checked' : ''}> Use a fixed card height</label>
         <div class="field"><label>Hour height (pixels)</label><input data-config="hour_height" type="number" min="1" step="1" value="${config.hour_height ?? 56}" ${fixedHeight ? 'disabled' : ''}><div class="hint">Timeline height per visible hour. Defaults to 56 pixels when omitted.</div></div>
+        <label class="toggle"><input data-config="fit_to_screen" type="checkbox" ${config.fit_to_screen === true ? 'checked' : ''} ${fixedHeight ? 'disabled' : ''}> Fit to screen and centre on now</label>
+        <div class="field"><label>Screen margin (pixels)</label><input data-config="screen_margin" type="number" min="0" step="1" value="${config.screen_margin ?? 16}" ${fixedHeight ? 'disabled' : ''}><div class="hint">Keeps hour height and crops the card to the space left on screen, centred on the current time. Earlier and later hours stay reachable by scrolling. Margin is the space left free below the card.</div></div>
         <div class="field fixed-height-field"><label>Fixed height (pixels)</label><input data-config="height" type="number" min="1" step="1" value="${fixedHeight ? config.height : ''}" ${fixedHeight ? '' : 'disabled'}><div class="hint">A fixed height compresses the timeline and overrides hour height; it does not hide events.</div></div>
       </section>
       <section class="section">
@@ -1093,7 +1118,7 @@ class MultidayCalendarCardEditor extends HTMLElement {
         });
         this.querySelector('[data-action="fixed-height"]')?.addEventListener('change', (event) => {
             const fixed = event.target.checked;
-            this.updateConfig({ height: fixed ? 480 : null }, true);
+            this.updateConfig(fixed ? { height: 480, fit_to_screen: false } : { height: null }, true);
         });
         this.querySelectorAll('[data-action="toggle-skip-day"]').forEach((button) => button.addEventListener('click', () => {
             const day = button.dataset.dayName;
@@ -1148,6 +1173,8 @@ const DEFAULT_CONFIG = {
         origin_snap_distance: 30,
         automatic_recenter: 30,
     },
+    fit_to_screen: false,
+    screen_margin: 16,
     show_now_line: true,
     skip_days: [],
     max_simultaneous_events: 3,
@@ -1157,6 +1184,8 @@ const DEFAULT_CONFIG = {
     custom_nominatim_url: undefined,
     calendars: [],
 };
+/** The card wrapper's bottom padding, which also has to fit on screen below the viewport. */
+const FIT_TO_SCREEN_WRAPPER_PADDING_PX = 12;
 function escapeHtml(value) {
     return value.replace(/[&<>'"]/g, (character) => {
         const entities = {
@@ -1221,11 +1250,32 @@ class MultiDayCalendarCard extends HTMLElement {
         /** True only after the current DOM has been placed at its configured origin once. */
         this._lookAroundInitialized = false;
         this._dayHeaderAnimationReady = false;
+        this._lastWindowWidth = 0;
+        this._lastWindowHeight = 0;
         this.handleConnectionReady = () => {
             if (this.isConnected) {
                 this.advanceStartDay(this.resolveStartDay());
                 void this.loadEvents(true);
             }
+        };
+        /** Rotating the tablet or resizing the window changes how much calendar fits, so start fresh. */
+        this.handleWindowResize = () => {
+            if (!this._config?.fit_to_screen)
+                return;
+            if (this._windowResizeTimerId !== undefined)
+                clearTimeout(this._windowResizeTimerId);
+            this._windowResizeTimerId = window.setTimeout(() => {
+                this._windowResizeTimerId = undefined;
+                if (!this.isConnected || !this._config?.fit_to_screen)
+                    return;
+                // Ignore small height changes such as mobile browser toolbars sliding in and out.
+                const widthChanged = window.innerWidth !== this._lastWindowWidth;
+                const heightChanged = Math.abs(window.innerHeight - this._lastWindowHeight) > 48;
+                if (!widthChanged && !heightChanged)
+                    return;
+                this._lookAroundInitialized = false;
+                this.render();
+            }, 200);
         };
         this.handleVisibilityChange = () => {
             if (document.visibilityState !== 'visible')
@@ -1295,6 +1345,22 @@ class MultiDayCalendarCard extends HTMLElement {
         const lookAroundErrors = validateLookAroundSettings(config.look_around);
         if (lookAroundErrors.length > 0)
             throw new Error(lookAroundErrors.join(' '));
+        if (config.fit_to_screen !== undefined && typeof config.fit_to_screen !== 'boolean') {
+            throw new Error('fit_to_screen must be true or false');
+        }
+        const fitToScreen = config.fit_to_screen === true;
+        if (fitToScreen && height !== null) {
+            throw new Error('fit_to_screen cannot be combined with height; remove height to keep hour_height');
+        }
+        const screenMargin = Number(config.screen_margin ?? DEFAULT_CONFIG.screen_margin);
+        if (!Number.isFinite(screenMargin) || screenMargin < 0) {
+            throw new Error('screen_margin must be a non-negative number of pixels');
+        }
+        const lookAround = normalizeLookAroundSettings(config.look_around);
+        // Cropping needs the buffered vertical strip, so fit_to_screen implies vertical look-around.
+        if (fitToScreen && !hasVerticalLookAround(lookAround.mode)) {
+            lookAround.mode = lookAround.mode === 'horizontal' ? 'full' : 'vertical';
+        }
         const calendars = config.calendars ?? [];
         if (!calendars.every((calendar) => calendar.entity.startsWith('calendar.'))) {
             throw new Error('Every calendars entry requires a calendar.* entity');
@@ -1312,7 +1378,9 @@ class MultiDayCalendarCard extends HTMLElement {
             max_simultaneous_events: maxSimultaneousEvents,
             height,
             hour_height: hourHeight,
-            look_around: normalizeLookAroundSettings(config.look_around),
+            look_around: lookAround,
+            fit_to_screen: fitToScreen,
+            screen_margin: screenMargin,
             calendars,
             tap_action: normalizeTapAction(config.tap_action),
             show_location_map: config.show_location_map === true,
@@ -1367,6 +1435,7 @@ class MultiDayCalendarCard extends HTMLElement {
         this.startClockTimer();
         this.startDayRolloverTimer();
         document.addEventListener('visibilitychange', this.handleVisibilityChange);
+        window.addEventListener('resize', this.handleWindowResize);
     }
     disconnectedCallback() {
         if (this._refreshTimerId !== undefined) {
@@ -1385,6 +1454,11 @@ class MultiDayCalendarCard extends HTMLElement {
         this.cancelLookAroundReset();
         this.watchConnection();
         document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+        window.removeEventListener('resize', this.handleWindowResize);
+        if (this._windowResizeTimerId !== undefined) {
+            clearTimeout(this._windowResizeTimerId);
+            this._windowResizeTimerId = undefined;
+        }
     }
     watchConnection(connection) {
         if (connection === this._connection)
@@ -1392,6 +1466,48 @@ class MultiDayCalendarCard extends HTMLElement {
         this._connection?.removeEventListener('ready', this.handleConnectionReady);
         this._connection = connection;
         this._connection?.addEventListener('ready', this.handleConnectionReady);
+    }
+    /**
+     * fit_to_screen: cap the vertical viewport at the space between its top edge and the bottom
+     * of the screen. The viewport's natural height (the configured range at hour_height) still
+     * applies when it is smaller, so nothing is stretched. The page is assumed to be scrolled to
+     * the top when this is measured, which is the normal case for a kiosk or tablet dashboard.
+     */
+    updateFitToScreen() {
+        const config = this._config;
+        if (!config?.fit_to_screen)
+            return;
+        const viewport = this.querySelector('.calendar-viewport.look-around-vertical');
+        if (!viewport)
+            return;
+        this._lastWindowWidth = window.innerWidth;
+        this._lastWindowHeight = window.innerHeight;
+        const maxHeight = fitToScreenMaxHeight(window.innerHeight, viewport.getBoundingClientRect().top, FIT_TO_SCREEN_WRAPPER_PADDING_PX + config.screen_margin);
+        viewport.style.setProperty('--fit-viewport-max-height', `${maxHeight}px`);
+    }
+    /**
+     * fit_to_screen: move the vertical origin so the current time sits in the middle of what is
+     * visible, without leaving start_time/end_time. The anchor's position defines the origin that
+     * look-around measures, snaps to and returns to.
+     */
+    applyCenteredOrigin(viewport) {
+        const config = this._config;
+        if (!config?.fit_to_screen)
+            return;
+        const anchor = viewport.querySelector('[data-look-around-vertical-anchor]');
+        if (!anchor)
+            return;
+        const configuredStart = parseTime(config.start_time);
+        const configuredEnd = parseTime(config.end_time);
+        const range = lookAroundVerticalRange(config.look_around.mode, configuredStart, configuredEnd);
+        const now = new Date();
+        let originMinutes = configuredStart;
+        if (this.normalDisplayDays().some((day) => sameLocalDay(day, now))) {
+            const headerHeight = viewport.querySelector('.day-header')?.getBoundingClientRect().height ?? 0;
+            const visibleMinutes = Math.max(0, (viewport.clientHeight - headerHeight) / (config.hour_height / 60));
+            originMinutes = centeredOriginMinutes(now.getHours() * 60 + now.getMinutes(), visibleMinutes, configuredStart, configuredEnd);
+        }
+        anchor.style.top = `${((originMinutes - range.startMinutes) / (range.endMinutes - range.startMinutes)) * 100}%`;
     }
     startClockTimer() {
         if (this._clockTimerId !== undefined)
@@ -1449,6 +1565,7 @@ class MultiDayCalendarCard extends HTMLElement {
                 }
             }
         });
+        this._lookAroundTrackNow?.();
     }
     startRefreshTimer() {
         if (!this._config)
@@ -1802,6 +1919,7 @@ class MultiDayCalendarCard extends HTMLElement {
         this._lookAroundScrollInProgress = false;
     }
     cancelLookAroundReset() {
+        this._lookAroundTrackNow = undefined;
         this.cancelPendingLookAroundMotion();
         if (this._lookAroundGeometryAnimationFrameId !== undefined) {
             cancelAnimationFrame(this._lookAroundGeometryAnimationFrameId);
@@ -1952,11 +2070,13 @@ class MultiDayCalendarCard extends HTMLElement {
             if (initialized)
                 return true;
             this.syncFixedVerticalLookAroundGeometry();
+            this.updateFitToScreen();
             const horizontalAnchor = anchorColumn();
             const verticalAnchor = anchorVertical();
             if ((horizontal && (!horizontalAnchor || viewport.scrollWidth <= viewport.clientWidth)) ||
                 (vertical && (!verticalAnchor || viewport.scrollHeight <= viewport.clientHeight)))
                 return false;
+            this.applyCenteredOrigin(viewport);
             const geometry = measureScrollGeometry();
             if (!geometry)
                 return false;
@@ -2051,9 +2171,32 @@ class MultiDayCalendarCard extends HTMLElement {
         const header = viewport.querySelector('.day-header');
         if (header)
             this._lookAroundHeaderResizeObserver.observe(header);
+        /** fit_to_screen: the current time has moved on, so the origin has too. */
+        const refreshCenteredOrigin = () => {
+            if (!this._config?.fit_to_screen)
+                return;
+            this.applyCenteredOrigin(viewport);
+            const geometry = measureScrollGeometry();
+            if (!geometry)
+                return;
+            scrollGeometry = geometry;
+            startLeft = geometry.originRawScroll.left;
+            startTop = geometry.originRawScroll.top;
+        };
+        this._lookAroundTrackNow = () => {
+            if (!initialized || this._lookAroundAnimating || this._lookAroundScrollInProgress)
+                return;
+            // Someone browsing other times keeps their place; the next recenter picks up the new origin.
+            if (!this._config?.fit_to_screen || !isAtCalendarOrigin())
+                return;
+            refreshCenteredOrigin();
+            if (vertical)
+                viewport.scrollTop = startTop;
+        };
         const resetLookAround = () => {
             if (!scrollGeometry)
                 return;
+            refreshCenteredOrigin();
             const target = calendarPointToRawScroll(calendarOrigin, scrollGeometry);
             this.animateLookAroundScroll(viewport, target.left, target.top, () => {
                 viewport.dispatchEvent(new Event('look-around-reset'));
@@ -2164,6 +2307,7 @@ class MultiDayCalendarCard extends HTMLElement {
             ? undefined
             : { left: previousViewport.scrollLeft, top: previousViewport.scrollTop };
         const config = this._config;
+        this._lookAroundTrackNow = undefined;
         this._renderedEvents = [];
         const now = new Date();
         const range = eventRangeForDays(this._activeStartDay ?? this.resolveStartDay(now), config.days, config.skip_days);
@@ -2332,7 +2476,7 @@ class MultiDayCalendarCard extends HTMLElement {
             ${verticalLookAround ? `<div class="time-axis-top-fade" style="height: ${dayHeaderHeight}px" aria-hidden="true"></div>` : ''}
             <div class="time-axis-bottom-fade" aria-hidden="true"></div>
             ${verticalLookAround
-            ? `<div class="calendar-viewport native-vertical-time-axis${horizontalLookAround ? ' look-around' : ''} look-around-vertical" style="--day-header-height: ${dayHeaderHeight}px; --look-around-viewport-timeline-height: ${baseTimelineHeight}px">
+            ? `<div class="calendar-viewport native-vertical-time-axis${horizontalLookAround ? ' look-around' : ''} look-around-vertical${config.fit_to_screen ? ' fit-to-screen' : ''}" style="--day-header-height: ${dayHeaderHeight}px; --look-around-viewport-timeline-height: ${baseTimelineHeight}px">
                   <div class="time-axis native-vertical-time-axis ${fixedHeight ? 'fixed-height' : ''} look-around-vertical-axis" style="--day-header-height: ${dayHeaderHeight}px; --look-around-viewport-timeline-height: ${baseTimelineHeight}px; --look-around-timeline-height: ${timelineHeight}px; height: ${timelineHeight + dayHeaderHeight + 7}px;">
                     <div class="time-axis-spacer"></div>
                     <div class="time-labels">${timeLabels}</div>
@@ -2390,6 +2534,8 @@ class MultiDayCalendarCard extends HTMLElement {
       /* In a fixed card the schedule owns the available height. Let the viewport shrink
          into that space instead of retaining the flowing-card timeline height. */
       .schedule.fixed-height .calendar-viewport.look-around-vertical { height: 100%; min-height: 0; }
+      /* fit_to_screen keeps the natural (hour_height) height but never taller than the space left on screen. */
+      .calendar-viewport.look-around-vertical.fit-to-screen { max-height: var(--fit-viewport-max-height, none); }
       /* The nested native axis replaces schedule's normal first grid child, so its viewport must span both outer columns. */
       .calendar-viewport.native-vertical-time-axis { grid-column: 1 / -1; display: grid; grid-template-columns: var(--time-axis-width) minmax(0, 1fr); }
       /* The time strip must mask the date-header edge; its own fades (local) and the schedule overlays (5/6) remain above it. */
@@ -2435,6 +2581,7 @@ class MultiDayCalendarCard extends HTMLElement {
     `;
         style.setAttribute('data-multiday-calendar-card', '');
         this.appendChild(style);
+        this.updateFitToScreen();
         this.updateStatusMessage();
         this.bindEventActions();
         if (horizontalLookAround || verticalLookAround)

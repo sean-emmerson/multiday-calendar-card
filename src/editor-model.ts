@@ -25,6 +25,8 @@ export type EditorConfig = {
   height?: number | null;
   hour_height?: number;
   look_around?: LookAroundConfig;
+  fit_to_screen?: boolean;
+  screen_margin?: number;
   show_now_line?: boolean;
   skip_days?: DayName[];
   max_simultaneous_events?: number;
@@ -107,6 +109,15 @@ export function validateEditorConfig(config: EditorConfig): string[] {
   }
   if (config.max_simultaneous_events !== undefined && (!Number.isInteger(config.max_simultaneous_events) || config.max_simultaneous_events < 1)) {
     errors.push('Maximum simultaneous events must be a positive whole number.');
+  }
+  if (config.fit_to_screen !== undefined && typeof config.fit_to_screen !== 'boolean') {
+    errors.push('Fit to screen must be true or false.');
+  }
+  if (config.fit_to_screen === true && config.height !== undefined && config.height !== null) {
+    errors.push('Fit to screen cannot be combined with a fixed height.');
+  }
+  if (config.screen_margin !== undefined && (!Number.isFinite(config.screen_margin) || config.screen_margin < 0)) {
+    errors.push('Screen margin must be a non-negative number of pixels.');
   }
   errors.push(...validateLookAroundSettings(config.look_around));
   const tapActionError = validateTapAction(config.tap_action);

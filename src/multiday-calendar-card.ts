@@ -26,6 +26,8 @@ import { parseTime } from './editor-model';
 import {
   LOOK_AROUND_BUFFER_DAYS,
   calendarPointToRawScroll,
+  centeredOriginMinutes,
+  fitToScreenMaxHeight,
   hasHorizontalLookAround,
   hasVerticalLookAround,
   lookAroundVisibleDays,
@@ -85,6 +87,16 @@ type MultiDayCalendarCardConfig = {
   hour_height?: number;
   /** Optional scroll behavior around the configured date/time origin. */
   look_around?: LookAroundConfig;
+
+  /**
+   * Keep hour_height and crop the card to the space left on screen. The visible window is
+   * centred on the current time (within start_time/end_time); the rest stays reachable by
+   * scrolling. Turns on vertical look-around automatically. Cannot be combined with height.
+   */
+  fit_to_screen?: boolean;
+
+  /** Pixels to leave free below the card when fit_to_screen is on. Defaults to 16. */
+  screen_margin?: number;
   show_now_line?: boolean;
   /** Two-letter weekday names to omit from the display, for example ['sa', 'su']. */
   skip_days?: DayName[];
@@ -132,6 +144,8 @@ const DEFAULT_CONFIG: Omit<NormalizedCardConfig, 'type' | 'title'> = {
     origin_snap_distance: 30,
     automatic_recenter: 30,
   },
+  fit_to_screen: false,
+  screen_margin: 16,
   show_now_line: true,
   skip_days: [],
   max_simultaneous_events: 3,
@@ -141,6 +155,9 @@ const DEFAULT_CONFIG: Omit<NormalizedCardConfig, 'type' | 'title'> = {
   custom_nominatim_url: undefined,
   calendars: [],
 };
+
+/** The card wrapper's bottom padding, which also has to fit on screen below the viewport. */
+const FIT_TO_SCREEN_WRAPPER_PADDING_PX = 12;
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => {
@@ -251,6 +268,11 @@ class MultiDayCalendarCard extends HTMLElement {
   private _lookAroundInitialized = false;
   private _dayHeaderHeight?: number;
   private _dayHeaderAnimationReady = false;
+  /** Re-centres the look-around origin on the current time while the user is resting at it. */
+  private _lookAroundTrackNow?: () => void;
+  private _windowResizeTimerId?: number;
+  private _lastWindowWidth = 0;
+  private _lastWindowHeight = 0;
 
   setConfig(config: MultiDayCalendarCardConfig): void {
     if (!config?.type) {
@@ -305,6 +327,23 @@ class MultiDayCalendarCard extends HTMLElement {
     const lookAroundErrors = validateLookAroundSettings(config.look_around);
     if (lookAroundErrors.length > 0) throw new Error(lookAroundErrors.join(' '));
 
+    if (config.fit_to_screen !== undefined && typeof config.fit_to_screen !== 'boolean') {
+      throw new Error('fit_to_screen must be true or false');
+    }
+    const fitToScreen = config.fit_to_screen === true;
+    if (fitToScreen && height !== null) {
+      throw new Error('fit_to_screen cannot be combined with height; remove height to keep hour_height');
+    }
+    const screenMargin = Number(config.screen_margin ?? DEFAULT_CONFIG.screen_margin);
+    if (!Number.isFinite(screenMargin) || screenMargin < 0) {
+      throw new Error('screen_margin must be a non-negative number of pixels');
+    }
+    const lookAround = normalizeLookAroundSettings(config.look_around);
+    // Cropping needs the buffered vertical strip, so fit_to_screen implies vertical look-around.
+    if (fitToScreen && !hasVerticalLookAround(lookAround.mode)) {
+      lookAround.mode = lookAround.mode === 'horizontal' ? 'full' : 'vertical';
+    }
+
     const calendars = config.calendars ?? [];
     if (!calendars.every((calendar) => calendar.entity.startsWith('calendar.'))) {
       throw new Error('Every calendars entry requires a calendar.* entity');
@@ -323,7 +362,9 @@ class MultiDayCalendarCard extends HTMLElement {
       max_simultaneous_events: maxSimultaneousEvents,
       height,
       hour_height: hourHeight,
-      look_around: normalizeLookAroundSettings(config.look_around),
+      look_around: lookAround,
+      fit_to_screen: fitToScreen,
+      screen_margin: screenMargin,
       calendars,
       tap_action: normalizeTapAction(config.tap_action),
       show_location_map: config.show_location_map === true,
@@ -377,6 +418,7 @@ class MultiDayCalendarCard extends HTMLElement {
     this.startClockTimer();
     this.startDayRolloverTimer();
     document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    window.addEventListener('resize', this.handleWindowResize);
   }
 
   disconnectedCallback(): void {
@@ -396,6 +438,11 @@ class MultiDayCalendarCard extends HTMLElement {
     this.cancelLookAroundReset();
     this.watchConnection();
     document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    window.removeEventListener('resize', this.handleWindowResize);
+    if (this._windowResizeTimerId !== undefined) {
+      clearTimeout(this._windowResizeTimerId);
+      this._windowResizeTimerId = undefined;
+    }
   }
 
   private watchConnection(connection?: HomeAssistantConnection): void {
@@ -411,6 +458,71 @@ class MultiDayCalendarCard extends HTMLElement {
       void this.loadEvents(true);
     }
   };
+
+  /** Rotating the tablet or resizing the window changes how much calendar fits, so start fresh. */
+  private handleWindowResize = (): void => {
+    if (!this._config?.fit_to_screen) return;
+    if (this._windowResizeTimerId !== undefined) clearTimeout(this._windowResizeTimerId);
+    this._windowResizeTimerId = window.setTimeout(() => {
+      this._windowResizeTimerId = undefined;
+      if (!this.isConnected || !this._config?.fit_to_screen) return;
+      // Ignore small height changes such as mobile browser toolbars sliding in and out.
+      const widthChanged = window.innerWidth !== this._lastWindowWidth;
+      const heightChanged = Math.abs(window.innerHeight - this._lastWindowHeight) > 48;
+      if (!widthChanged && !heightChanged) return;
+      this._lookAroundInitialized = false;
+      this.render();
+    }, 200);
+  };
+
+  /**
+   * fit_to_screen: cap the vertical viewport at the space between its top edge and the bottom
+   * of the screen. The viewport's natural height (the configured range at hour_height) still
+   * applies when it is smaller, so nothing is stretched. The page is assumed to be scrolled to
+   * the top when this is measured, which is the normal case for a kiosk or tablet dashboard.
+   */
+  private updateFitToScreen(): void {
+    const config = this._config;
+    if (!config?.fit_to_screen) return;
+    const viewport = this.querySelector<HTMLElement>('.calendar-viewport.look-around-vertical');
+    if (!viewport) return;
+    this._lastWindowWidth = window.innerWidth;
+    this._lastWindowHeight = window.innerHeight;
+    const maxHeight = fitToScreenMaxHeight(
+      window.innerHeight,
+      viewport.getBoundingClientRect().top,
+      FIT_TO_SCREEN_WRAPPER_PADDING_PX + config.screen_margin,
+    );
+    viewport.style.setProperty('--fit-viewport-max-height', `${maxHeight}px`);
+  }
+
+  /**
+   * fit_to_screen: move the vertical origin so the current time sits in the middle of what is
+   * visible, without leaving start_time/end_time. The anchor's position defines the origin that
+   * look-around measures, snaps to and returns to.
+   */
+  private applyCenteredOrigin(viewport: HTMLElement): void {
+    const config = this._config;
+    if (!config?.fit_to_screen) return;
+    const anchor = viewport.querySelector<HTMLElement>('[data-look-around-vertical-anchor]');
+    if (!anchor) return;
+    const configuredStart = parseTime(config.start_time)!;
+    const configuredEnd = parseTime(config.end_time)!;
+    const range = lookAroundVerticalRange(config.look_around.mode, configuredStart, configuredEnd);
+    const now = new Date();
+    let originMinutes = configuredStart;
+    if (this.normalDisplayDays().some((day) => sameLocalDay(day, now))) {
+      const headerHeight = viewport.querySelector<HTMLElement>('.day-header')?.getBoundingClientRect().height ?? 0;
+      const visibleMinutes = Math.max(0, (viewport.clientHeight - headerHeight) / (config.hour_height / 60));
+      originMinutes = centeredOriginMinutes(
+        now.getHours() * 60 + now.getMinutes(),
+        visibleMinutes,
+        configuredStart,
+        configuredEnd,
+      );
+    }
+    anchor.style.top = `${((originMinutes - range.startMinutes) / (range.endMinutes - range.startMinutes)) * 100}%`;
+  }
 
   private handleVisibilityChange = (): void => {
     if (document.visibilityState !== 'visible') return;
@@ -476,6 +588,7 @@ class MultiDayCalendarCard extends HTMLElement {
         }
       }
     });
+    this._lookAroundTrackNow?.();
   }
 
   private startRefreshTimer(): void {
@@ -858,6 +971,7 @@ class MultiDayCalendarCard extends HTMLElement {
   }
 
   private cancelLookAroundReset(): void {
+    this._lookAroundTrackNow = undefined;
     this.cancelPendingLookAroundMotion();
     if (this._lookAroundGeometryAnimationFrameId !== undefined) {
       cancelAnimationFrame(this._lookAroundGeometryAnimationFrameId);
@@ -1010,10 +1124,12 @@ class MultiDayCalendarCard extends HTMLElement {
     const positionAtStartDay = (): boolean => {
       if (initialized) return true;
       this.syncFixedVerticalLookAroundGeometry();
+      this.updateFitToScreen();
       const horizontalAnchor = anchorColumn();
       const verticalAnchor = anchorVertical();
       if ((horizontal && (!horizontalAnchor || viewport.scrollWidth <= viewport.clientWidth)) ||
           (vertical && (!verticalAnchor || viewport.scrollHeight <= viewport.clientHeight))) return false;
+      this.applyCenteredOrigin(viewport);
       const geometry = measureScrollGeometry();
       if (!geometry) return false;
       scrollGeometry = geometry;
@@ -1094,8 +1210,26 @@ class MultiDayCalendarCard extends HTMLElement {
     this._lookAroundHeaderResizeObserver = new ResizeObserver(scheduleGeometryRefresh);
     const header = viewport.querySelector<HTMLElement>('.day-header');
     if (header) this._lookAroundHeaderResizeObserver.observe(header);
+    /** fit_to_screen: the current time has moved on, so the origin has too. */
+    const refreshCenteredOrigin = (): void => {
+      if (!this._config?.fit_to_screen) return;
+      this.applyCenteredOrigin(viewport);
+      const geometry = measureScrollGeometry();
+      if (!geometry) return;
+      scrollGeometry = geometry;
+      startLeft = geometry.originRawScroll.left;
+      startTop = geometry.originRawScroll.top;
+    };
+    this._lookAroundTrackNow = (): void => {
+      if (!initialized || this._lookAroundAnimating || this._lookAroundScrollInProgress) return;
+      // Someone browsing other times keeps their place; the next recenter picks up the new origin.
+      if (!this._config?.fit_to_screen || !isAtCalendarOrigin()) return;
+      refreshCenteredOrigin();
+      if (vertical) viewport.scrollTop = startTop;
+    };
     const resetLookAround = (): void => {
       if (!scrollGeometry) return;
+      refreshCenteredOrigin();
       const target = calendarPointToRawScroll(calendarOrigin, scrollGeometry);
       this.animateLookAroundScroll(viewport, target.left, target.top, () => {
         viewport.dispatchEvent(new Event('look-around-reset'));
@@ -1194,6 +1328,7 @@ class MultiDayCalendarCard extends HTMLElement {
       ? undefined
       : { left: previousViewport.scrollLeft, top: previousViewport.scrollTop };
     const config = this._config;
+    this._lookAroundTrackNow = undefined;
     this._renderedEvents = [];
     const now = new Date();
     const range = eventRangeForDays(
@@ -1399,7 +1534,7 @@ class MultiDayCalendarCard extends HTMLElement {
             ${verticalLookAround ? `<div class="time-axis-top-fade" style="height: ${dayHeaderHeight}px" aria-hidden="true"></div>` : ''}
             <div class="time-axis-bottom-fade" aria-hidden="true"></div>
             ${verticalLookAround
-              ? `<div class="calendar-viewport native-vertical-time-axis${horizontalLookAround ? ' look-around' : ''} look-around-vertical" style="--day-header-height: ${dayHeaderHeight}px; --look-around-viewport-timeline-height: ${baseTimelineHeight}px">
+              ? `<div class="calendar-viewport native-vertical-time-axis${horizontalLookAround ? ' look-around' : ''} look-around-vertical${config.fit_to_screen ? ' fit-to-screen' : ''}" style="--day-header-height: ${dayHeaderHeight}px; --look-around-viewport-timeline-height: ${baseTimelineHeight}px">
                   <div class="time-axis native-vertical-time-axis ${fixedHeight ? 'fixed-height' : ''} look-around-vertical-axis" style="--day-header-height: ${dayHeaderHeight}px; --look-around-viewport-timeline-height: ${baseTimelineHeight}px; --look-around-timeline-height: ${timelineHeight}px; height: ${timelineHeight + dayHeaderHeight + 7}px;">
                     <div class="time-axis-spacer"></div>
                     <div class="time-labels">${timeLabels}</div>
@@ -1458,6 +1593,8 @@ class MultiDayCalendarCard extends HTMLElement {
       /* In a fixed card the schedule owns the available height. Let the viewport shrink
          into that space instead of retaining the flowing-card timeline height. */
       .schedule.fixed-height .calendar-viewport.look-around-vertical { height: 100%; min-height: 0; }
+      /* fit_to_screen keeps the natural (hour_height) height but never taller than the space left on screen. */
+      .calendar-viewport.look-around-vertical.fit-to-screen { max-height: var(--fit-viewport-max-height, none); }
       /* The nested native axis replaces schedule's normal first grid child, so its viewport must span both outer columns. */
       .calendar-viewport.native-vertical-time-axis { grid-column: 1 / -1; display: grid; grid-template-columns: var(--time-axis-width) minmax(0, 1fr); }
       /* The time strip must mask the date-header edge; its own fades (local) and the schedule overlays (5/6) remain above it. */
@@ -1504,6 +1641,7 @@ class MultiDayCalendarCard extends HTMLElement {
 
     style.setAttribute('data-multiday-calendar-card', '');
     this.appendChild(style);
+    this.updateFitToScreen();
     this.updateStatusMessage();
     this.bindEventActions();
     if (horizontalLookAround || verticalLookAround) this.bindLookAround(preservedScrollPosition);

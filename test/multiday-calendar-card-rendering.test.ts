@@ -19,7 +19,11 @@ Object.assign(globalThis, {
       return elementRegistry.get(name);
     },
   },
-  window: { customCards: [] },
+  window: {
+    customCards: [],
+    addEventListener(): void {},
+    removeEventListener(): void {},
+  },
   document: {
     addEventListener(): void {},
     removeEventListener(): void {},
@@ -388,4 +392,41 @@ test('look-around viewport work is limited to one callback per animation frame',
   } finally {
     globalThis.requestAnimationFrame = originalRequestAnimationFrame;
   }
+});
+
+test('fit_to_screen implies vertical look-around and rejects a fixed height', () => {
+  const CalendarCard = elementRegistry.get('multiday-calendar-card');
+  assert.ok(CalendarCard);
+
+  type ConfigurableCard = FakeHTMLElement & {
+    setConfig(config: Record<string, unknown>): void;
+    render(): void;
+    _config: { fit_to_screen: boolean; screen_margin: number; look_around: { mode: string } };
+  };
+  const make = (): ConfigurableCard => {
+    const card = new CalendarCard() as ConfigurableCard;
+    card.render = () => {};
+    return card;
+  };
+  const base = { type: 'custom:multiday-calendar-card', calendars: [] };
+
+  const plain = make();
+  plain.setConfig({ ...base, fit_to_screen: true });
+  assert.equal(plain._config.fit_to_screen, true);
+  assert.equal(plain._config.screen_margin, 16);
+  assert.equal(plain._config.look_around.mode, 'vertical');
+
+  const horizontal = make();
+  horizontal.setConfig({ ...base, fit_to_screen: true, screen_margin: 40, look_around: { mode: 'horizontal' } });
+  assert.equal(horizontal._config.look_around.mode, 'full');
+  assert.equal(horizontal._config.screen_margin, 40);
+
+  const off = make();
+  off.setConfig({ ...base, look_around: { mode: 'none' } });
+  assert.equal(off._config.fit_to_screen, false);
+  assert.equal(off._config.look_around.mode, 'none');
+
+  assert.throws(() => make().setConfig({ ...base, fit_to_screen: true, height: 480 }), /cannot be combined with height/);
+  assert.throws(() => make().setConfig({ ...base, fit_to_screen: 'yes' }), /true or false/);
+  assert.throws(() => make().setConfig({ ...base, fit_to_screen: true, screen_margin: -1 }), /screen_margin/);
 });
