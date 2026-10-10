@@ -110,6 +110,7 @@ calendars:
 | `height` | unset | Fixed outer-card height in pixels. It takes precedence over `hour_height` and compresses the timeline without hiding events. |
 | `fit_to_screen` | `false` | Keep `hour_height` and crop the card to the space left on screen, centred on the current time. See [Fit to screen](#fit-to-screen). Cannot be combined with `height`. |
 | `screen_margin` | `16` | Pixels to leave free below the card when `fit_to_screen` is on. |
+| `day_navigation` | `false` | Show previous/next day buttons and turn horizontal scrolling off. See [Day navigation](#day-navigation). |
 | `refresh_interval` | `30` | Minutes between calendar refreshes. It must be a positive number. |
 | `look_around.mode` | `none` | Enables scrolling to explore events beyond the configured boundaries. Allowed values: `none`, `horizontal`, `vertical`, and `full`. |
 | `look_around.origin_snap_distance` | `30` | Prevents the calendar from scrolling until the configured amount of scrolling input was registered in pixels. Set `0` to disable origin snapping. |
@@ -182,6 +183,24 @@ calendars:
 - While you rest at the starting position the window follows the clock. If you have scrolled elsewhere it stays put, then returns to the new "now" after `look_around.automatic_recenter` seconds or when you tap the recenter button.
 - If the whole configured range fits on screen at `hour_height`, the card is not stretched.
 - The available height is measured when the card loads and when the window size or orientation changes. It assumes the page is scrolled to the top; use `screen_margin` to leave room for anything else below the card.
+
+### Day navigation
+
+`day_navigation: true` replaces sideways scrolling with two buttons, one at each end of the date row. Each press moves the window by one displayed day (weekdays in `skip_days` are stepped over), so with `days: 2` the card goes from Sat/Sun to Sun/Mon. Vertical scrolling and `fit_to_screen` keep working, and your vertical position is kept as you change day.
+
+```
+type: custom:multiday-calendar-card
+days: 2
+hour_height: 56
+fit_to_screen: true
+day_navigation: true
+calendars:
+  - entity: calendar.household
+```
+
+- `look_around` `horizontal` is turned off, and `full` becomes `vertical`.
+- After `look_around.automatic_recenter` seconds (default 30, `0` to disable) the card returns to today by itself. The offset is also dropped at midnight or when `start_day_entity` changes.
+- Days that were already loaded are reused, so only newly visible days are fetched.
 
 ## Visual editor
 

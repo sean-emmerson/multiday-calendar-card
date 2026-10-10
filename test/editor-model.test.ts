@@ -204,3 +204,13 @@ test('fit_to_screen validates its type, its margin and its conflict with a fixed
   assert.ok(validateEditorConfig({ ...base, fit_to_screen: 'yes' as unknown as boolean }).some((error) => /true or false/i.test(error)));
   assert.ok(validateEditorConfig({ ...base, screen_margin: -4 }).some((error) => /screen margin/i.test(error)));
 });
+
+test('day_navigation validates its type and warns when horizontal look-around is also selected', () => {
+  const base = { type: 'custom:multiday-calendar-card', calendars: [{ entity: 'calendar.household' }] };
+
+  assert.deepEqual(validateEditorConfig({ ...base, day_navigation: true }), []);
+  assert.ok(validateEditorConfig({ ...base, day_navigation: 'yes' as unknown as boolean }).some((error) => /true or false/i.test(error)));
+  assert.equal(editorWarnings({ ...base, day_navigation: true, look_around: { mode: 'vertical' } }).length, 0);
+  assert.equal(editorWarnings({ ...base, day_navigation: true, look_around: { mode: 'full' } }).length, 1);
+  assert.equal(editorWarnings({ ...base, look_around: { mode: 'full' } }).length, 0);
+});

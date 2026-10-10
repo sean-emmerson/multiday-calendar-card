@@ -59,6 +59,20 @@ export function visibleDaysBefore(anchor: Date, days: number, skipDays: readonly
   return visible.reverse();
 }
 
+/**
+ * Move a start day by whole displayed days, stepping over any skipped weekdays. Zero steps return
+ * the base day untouched; otherwise the result is always a displayed (non-skipped) day.
+ */
+export function shiftDisplayedDay(base: Date, steps: number, skipDays: readonly DayName[] = []): Date {
+  const start = new Date(base);
+  start.setHours(0, 0, 0, 0);
+  if (steps === 0) return start;
+  const first = visibleDays(start, 1, skipDays)[0];
+  return steps > 0
+    ? visibleDays(first, steps + 1, skipDays)[steps]
+    : visibleDaysBefore(first, -steps, skipDays)[0];
+}
+
 /** Use local calendar dates so daylight-saving transitions do not affect gap detection. */
 export function hasSkippedDaysBetween(left: Date, right: Date): boolean {
   const localCalendarDay = (date: Date): number =>

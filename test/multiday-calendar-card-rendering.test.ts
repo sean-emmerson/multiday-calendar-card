@@ -430,3 +430,33 @@ test('fit_to_screen implies vertical look-around and rejects a fixed height', ()
   assert.throws(() => make().setConfig({ ...base, fit_to_screen: 'yes' }), /true or false/);
   assert.throws(() => make().setConfig({ ...base, fit_to_screen: true, screen_margin: -1 }), /screen_margin/);
 });
+
+test('day_navigation removes horizontal look-around and combines with fit_to_screen', () => {
+  const CalendarCard = elementRegistry.get('multiday-calendar-card');
+  assert.ok(CalendarCard);
+
+  type NavCard = FakeHTMLElement & {
+    setConfig(config: Record<string, unknown>): void;
+    render(): void;
+    _config: { day_navigation: boolean; look_around: { mode: string } };
+  };
+  const make = (): NavCard => {
+    const card = new CalendarCard() as NavCard;
+    card.render = () => {};
+    return card;
+  };
+  const base = { type: 'custom:multiday-calendar-card', calendars: [] };
+  const mode = (config: Record<string, unknown>): string => {
+    const card = make();
+    card.setConfig({ ...base, ...config });
+    return card._config.look_around.mode;
+  };
+
+  assert.equal(mode({ day_navigation: true, look_around: { mode: 'horizontal' } }), 'none');
+  assert.equal(mode({ day_navigation: true, look_around: { mode: 'full' } }), 'vertical');
+  assert.equal(mode({ day_navigation: true, look_around: { mode: 'vertical' } }), 'vertical');
+  assert.equal(mode({ day_navigation: true, fit_to_screen: true, look_around: { mode: 'horizontal' } }), 'vertical');
+  assert.equal(mode({ day_navigation: true }), 'none');
+  assert.equal(mode({ look_around: { mode: 'full' } }), 'full');
+  assert.throws(() => make().setConfig({ ...base, day_navigation: 'yes' }), /true or false/);
+});

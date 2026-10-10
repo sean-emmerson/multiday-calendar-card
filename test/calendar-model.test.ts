@@ -20,6 +20,7 @@ import {
   hasSkippedDaysBetween,
   hasSkippedDaysBeforeFirstVisibleDay,
   normalizeSkipDays,
+  shiftDisplayedDay,
   visibleDays,
   visibleDaysBefore,
 } from '../src/calendar-model';
@@ -382,4 +383,25 @@ test('layoutTimedEventLanes displays only the first event in an overlap componen
 test('averageEventColors averages valid RGB colours and returns undefined when no valid colours exist', () => {
   assert.equal(averageEventColors(['#ff0000', '#0000ff']), '#800080');
   assert.equal(averageEventColors(['invalid']), undefined);
+});
+
+test('shiftDisplayedDay moves by displayed days and steps over skipped weekdays', () => {
+  const key = (date: Date): string => `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+  const friday = new Date(2026, 9, 9, 15, 30); // Fri 9 Oct 2026
+  const saturday = new Date(2026, 9, 10);
+
+  assert.equal(key(shiftDisplayedDay(friday, 0)), '2026-10-9');
+  assert.equal(key(shiftDisplayedDay(friday, 1)), '2026-10-10');
+  assert.equal(key(shiftDisplayedDay(friday, -1)), '2026-10-8');
+  assert.equal(key(shiftDisplayedDay(friday, 3)), '2026-10-12');
+
+  // With the weekend hidden, Friday + 1 is Monday and Monday - 1 is Friday.
+  assert.equal(key(shiftDisplayedDay(friday, 1, ['sa', 'su'])), '2026-10-12');
+  assert.equal(key(shiftDisplayedDay(new Date(2026, 9, 12), -1, ['sa', 'su'])), '2026-10-9');
+  // A skipped base day counts from the next displayed day.
+  assert.equal(key(shiftDisplayedDay(saturday, 1, ['sa', 'su'])), '2026-10-13');
+  assert.equal(key(shiftDisplayedDay(saturday, -1, ['sa', 'su'])), '2026-10-9');
+  // Zero steps never changes the base, and the result is local midnight.
+  assert.equal(key(shiftDisplayedDay(saturday, 0, ['sa', 'su'])), '2026-10-10');
+  assert.equal(shiftDisplayedDay(friday, 2).getHours(), 0);
 });

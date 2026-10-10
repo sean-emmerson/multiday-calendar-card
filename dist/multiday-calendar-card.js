@@ -42,6 +42,20 @@ function visibleDaysBefore(anchor, days, skipDays = []) {
     }
     return visible.reverse();
 }
+/**
+ * Move a start day by whole displayed days, stepping over any skipped weekdays. Zero steps return
+ * the base day untouched; otherwise the result is always a displayed (non-skipped) day.
+ */
+function shiftDisplayedDay(base, steps, skipDays = []) {
+    const start = new Date(base);
+    start.setHours(0, 0, 0, 0);
+    if (steps === 0)
+        return start;
+    const first = visibleDays(start, 1, skipDays)[0];
+    return steps > 0
+        ? visibleDays(first, steps + 1, skipDays)[steps]
+        : visibleDaysBefore(first, -steps, skipDays)[0];
+}
 /** Use local calendar dates so daylight-saving transitions do not affect gap detection. */
 function hasSkippedDaysBetween(left, right) {
     const localCalendarDay = (date) => Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
@@ -555,6 +569,9 @@ function validateEditorConfig(config) {
     if (config.fit_to_screen === true && config.height !== undefined && config.height !== null) {
         errors.push('Fit to screen cannot be combined with a fixed height.');
     }
+    if (config.day_navigation !== undefined && typeof config.day_navigation !== 'boolean') {
+        errors.push('Day navigation must be true or false.');
+    }
     if (config.screen_margin !== undefined && (!Number.isFinite(config.screen_margin) || config.screen_margin < 0)) {
         errors.push('Screen margin must be a non-negative number of pixels.');
     }
@@ -583,6 +600,10 @@ function editorWarnings(config) {
         const duplicate = values.find((value, index) => values.indexOf(value) !== index);
         if (duplicate)
             warnings.push(`Two or more calendar sources use the ${property} ${property === 'label' ? `“${duplicate}”` : duplicate}.`);
+    }
+    const lookAroundMode = config.look_around?.mode;
+    if (config.day_navigation === true && (lookAroundMode === 'horizontal' || lookAroundMode === 'full')) {
+        warnings.push('Horizontal scrolling is switched off while the previous/next day buttons are shown.');
     }
     return warnings;
 }
@@ -1074,6 +1095,7 @@ class MultidayCalendarCardEditor extends HTMLElement {
           <div class="field"><label>End time</label><select data-config="end_time">${parseTime(endTime) % 60 !== 0 ? `<option value="${endTime}" selected>${endTime} (custom)</option>` : ''}${Array.from({ length: 24 }, (_, hour) => hour + 1).map((hour) => `<option value="${String(hour).padStart(2, '0')}:00" ${endTime === formatTime(hour * 60) ? 'selected' : ''}>${String(hour).padStart(2, '0')}:00</option>`).join('')}</select></div>
         </div>
         <label class="toggle"><input data-config="show_now_line" type="checkbox" ${config.show_now_line !== false ? 'checked' : ''}> Show current-time line</label>
+        <label class="toggle"><input data-config="day_navigation" type="checkbox" ${config.day_navigation === true ? 'checked' : ''}> Previous/next day buttons (no sideways scrolling)</label>
         <div class="field"><label>Skip days</label><div class="day-toggle-group" role="group" aria-label="Days to skip">${DAY_NAMES.map((day) => `<button class="day-toggle" data-action="toggle-skip-day" data-day-name="${day}" type="button" aria-pressed="${config.skip_days?.includes(day) === true}">${day}</button>`).join('')}</div><div class="hint">Selected days are omitted. Use two-letter names in YAML, for example <code>skip_days: [sa, su]</code>.</div></div>
         <div class="field"><label>Maximum simultaneous timed events</label><input data-config="max_simultaneous_events" type="number" min="1" step="1" value="${config.max_simultaneous_events ?? 3}"><div class="hint">At 1, only the first overlapping event is shown. At 2 or more, the final lane summarizes any excess as “+N more”.</div></div>
       </section>
@@ -1175,6 +1197,7 @@ const DEFAULT_CONFIG = {
     },
     fit_to_screen: false,
     screen_margin: 16,
+    day_navigation: false,
     show_now_line: true,
     skip_days: [],
     max_simultaneous_events: 3,
@@ -1184,6 +1207,8 @@ const DEFAULT_CONFIG = {
     custom_nominatim_url: undefined,
     calendars: [],
 };
+const DAY_NAV_PREVIOUS_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>';
+const DAY_NAV_NEXT_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.59 16.59 10 18l6-6-6-6-1.41 1.41L13.17 12z"/></svg>';
 /** The card wrapper's bottom padding, which also has to fit on screen below the viewport. */
 const FIT_TO_SCREEN_WRAPPER_PADDING_PX = 12;
 function escapeHtml(value) {
@@ -1250,6 +1275,8 @@ class MultiDayCalendarCard extends HTMLElement {
         /** True only after the current DOM has been placed at its configured origin once. */
         this._lookAroundInitialized = false;
         this._dayHeaderAnimationReady = false;
+        /** day_navigation: displayed days the window has been moved away from its base start day. */
+        this._dayOffset = 0;
         this._lastWindowWidth = 0;
         this._lastWindowHeight = 0;
         this.handleConnectionReady = () => {
@@ -1356,7 +1383,18 @@ class MultiDayCalendarCard extends HTMLElement {
         if (!Number.isFinite(screenMargin) || screenMargin < 0) {
             throw new Error('screen_margin must be a non-negative number of pixels');
         }
+        if (config.day_navigation !== undefined && typeof config.day_navigation !== 'boolean') {
+            throw new Error('day_navigation must be true or false');
+        }
+        const dayNavigation = config.day_navigation === true;
         const lookAround = normalizeLookAroundSettings(config.look_around);
+        // The buttons replace sideways scrolling, so only the vertical axis stays scrollable.
+        if (dayNavigation) {
+            if (lookAround.mode === 'horizontal')
+                lookAround.mode = 'none';
+            else if (lookAround.mode === 'full')
+                lookAround.mode = 'vertical';
+        }
         // Cropping needs the buffered vertical strip, so fit_to_screen implies vertical look-around.
         if (fitToScreen && !hasVerticalLookAround(lookAround.mode)) {
             lookAround.mode = lookAround.mode === 'horizontal' ? 'full' : 'vertical';
@@ -1381,6 +1419,7 @@ class MultiDayCalendarCard extends HTMLElement {
             look_around: lookAround,
             fit_to_screen: fitToScreen,
             screen_margin: screenMargin,
+            day_navigation: dayNavigation,
             calendars,
             tap_action: normalizeTapAction(config.tap_action),
             show_location_map: config.show_location_map === true,
@@ -1397,6 +1436,8 @@ class MultiDayCalendarCard extends HTMLElement {
         this._lookAroundInitialized = false;
         this._dayHeaderHeight = undefined;
         this._dayHeaderAnimationReady = false;
+        this._dayOffset = 0;
+        this.cancelDayNavigationReturn();
         this.onNewStartDate(this.resolveStartDay());
         this.cancelRecoveryRefresh();
         this._failedFetchAttempts = 0;
@@ -1455,6 +1496,7 @@ class MultiDayCalendarCard extends HTMLElement {
         this.watchConnection();
         document.removeEventListener('visibilitychange', this.handleVisibilityChange);
         window.removeEventListener('resize', this.handleWindowResize);
+        this.cancelDayNavigationReturn();
         if (this._windowResizeTimerId !== undefined) {
             clearTimeout(this._windowResizeTimerId);
             this._windowResizeTimerId = undefined;
@@ -1530,7 +1572,7 @@ class MultiDayCalendarCard extends HTMLElement {
         nextMidnight.setHours(24, 0, 0, 50);
         this._dayRolloverTimerId = window.setTimeout(() => {
             this._dayRolloverTimerId = undefined;
-            if (this.isConnected && this.advanceStartDay(new Date()))
+            if (this.isConnected && this.advanceStartDay(this.resolveStartDay()))
                 void this.loadEvents(true);
             if (this.isConnected)
                 this.startDayRolloverTimer();
@@ -1595,7 +1637,16 @@ class MultiDayCalendarCard extends HTMLElement {
         }, CALENDAR_FETCH_RECOVERY_DELAY_MS);
     }
     resolveStartDay(now = new Date()) {
-        return startDayForEntityState(this._config?.start_day_entity === undefined ? undefined : this._hass?.states?.[this._config.start_day_entity]?.state, now);
+        const base = startDayForEntityState(this._config?.start_day_entity === undefined ? undefined : this._hass?.states?.[this._config.start_day_entity]?.state, now);
+        if (!this._config?.day_navigation)
+            return base;
+        // A new base day (midnight, or the start-day entity changing) discards the manual offset.
+        const baseKey = localDateKey(base);
+        if (this._offsetBaseKey !== baseKey) {
+            this._offsetBaseKey = baseKey;
+            this._dayOffset = 0;
+        }
+        return shiftDisplayedDay(base, this._dayOffset, this._config.skip_days);
     }
     onNewStartDate(date) {
         const startDay = new Date(date);
@@ -1608,6 +1659,43 @@ class MultiDayCalendarCard extends HTMLElement {
         this._dayHeaderAnimationReady = false;
         this.invalidateEventCache();
         return true;
+    }
+    cancelDayNavigationReturn() {
+        if (this._dayNavigationReturnTimerId !== undefined) {
+            clearTimeout(this._dayNavigationReturnTimerId);
+            this._dayNavigationReturnTimerId = undefined;
+        }
+    }
+    /** day_navigation: the buttons move the window; resting away from today eventually returns to it. */
+    navigateDays(steps) {
+        if (!this._config?.day_navigation || steps === 0)
+            return;
+        this.setDayOffset(this._dayOffset + steps);
+    }
+    setDayOffset(offset) {
+        if (!this._config?.day_navigation)
+            return;
+        this._dayOffset = offset;
+        this.cancelDayNavigationReturn();
+        const startDay = this.resolveStartDay();
+        startDay.setHours(0, 0, 0, 0);
+        if (!this._activeStartDay || !sameLocalDay(this._activeStartDay, startDay)) {
+            // Cached days stay valid, so only the days that newly come into view are fetched. The
+            // vertical scroll position is kept: render() preserves it while look-around is initialised.
+            this._activeStartDay = startDay;
+            this._dayHeaderHeight = undefined;
+            this._dayHeaderAnimationReady = false;
+            this.render();
+            void this.loadEvents();
+        }
+        const returnAfterSeconds = this._config.look_around.automatic_recenter;
+        if (this._dayOffset !== 0 && returnAfterSeconds > 0) {
+            this._dayNavigationReturnTimerId = window.setTimeout(() => {
+                this._dayNavigationReturnTimerId = undefined;
+                if (this.isConnected)
+                    this.setDayOffset(0);
+            }, returnAfterSeconds * 1_000);
+        }
     }
     /** Rebuild date columns when the active local date changes, including virtual look-around strips. */
     advanceStartDay(date) {
@@ -2467,7 +2555,8 @@ class MultiDayCalendarCard extends HTMLElement {
         <div class="wrapper ${fixedHeight ? 'fixed-height' : ''}">
           ${titlePlacement.bodyTitle ? `<h1 class="fixed-height-title">${escapeHtml(titlePlacement.bodyTitle)}</h1>` : ''}
           ${status}
-          <div class="schedule ${fixedHeight ? 'fixed-height' : ''}" role="grid" aria-label="${escapeHtml(accessibleTitle)}">
+          <div class="schedule ${fixedHeight ? 'fixed-height' : ''}${config.day_navigation ? ' day-navigation' : ''}" role="grid" aria-label="${escapeHtml(accessibleTitle)}">
+            ${config.day_navigation ? `<button class="day-nav day-nav-prev" type="button" data-day-nav="-1" title="Previous day" aria-label="Previous day">${DAY_NAV_PREVIOUS_ICON_SVG}</button><button class="day-nav day-nav-next" type="button" data-day-nav="1" title="Next day" aria-label="Next day">${DAY_NAV_NEXT_ICON_SVG}</button>` : ''}
             ${horizontalLookAround || verticalLookAround ? `<button class="look-around-recenter is-hidden" type="button" aria-hidden="true" title="Return to start day" aria-label="Return to start day">${RECENTER_ICON_SVG}</button>` : ''}
             ${verticalLookAround ? '' : `<div class="time-axis ${fixedHeight ? 'fixed-height' : ''}" style="--day-header-height: ${dayHeaderHeight}px; --look-around-viewport-timeline-height: ${baseTimelineHeight}px; --look-around-timeline-height: ${timelineHeight}px;${fixedHeight ? '' : ` height: ${timelineHeight + dayHeaderHeight + 7}px;`}">
               <div class="time-axis-spacer"></div>
@@ -2519,6 +2608,15 @@ class MultiDayCalendarCard extends HTMLElement {
       .look-around-recenter:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
       .look-around-recenter-icon { display: block; flex: 0 0 auto; width: 18px; height: 18px; fill: currentColor; }
       .schedule.fixed-height { flex: 1; min-height: 0; }
+      .day-nav { position: absolute; z-index: 6; top: 3px; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 1px solid var(--divider-color); border-radius: 50%; background: var(--card-background-color); color: var(--primary-text-color); line-height: 0; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+      .day-nav-prev { left: calc(var(--time-axis-width) + 4px); }
+      .day-nav-next { right: 10px; }
+      .day-nav:hover { background: color-mix(in srgb, var(--card-background-color) 85%, var(--primary-color)); }
+      .day-nav:active { background: color-mix(in srgb, var(--card-background-color) 70%, var(--primary-color)); }
+      .day-nav:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+      .day-nav svg { display: block; width: 22px; height: 22px; fill: currentColor; }
+      /* Days change with the buttons, so nothing may pan sideways. */
+      .schedule.day-navigation .calendar-viewport { overflow-x: hidden; }
       .time-axis { position: relative; color: var(--primary-text-color); font-size: ${CALENDAR_VISUAL_LAYOUT.textSizeRem}rem; }
       .time-axis.fixed-height { height: 100%; }
       .time-axis-spacer { height: var(--day-header-height); border-bottom: ${'none'}; }
@@ -2583,6 +2681,9 @@ class MultiDayCalendarCard extends HTMLElement {
         this.appendChild(style);
         this.updateFitToScreen();
         this.updateStatusMessage();
+        this.querySelectorAll('[data-day-nav]').forEach((button) => {
+            button.addEventListener('click', () => this.navigateDays(Number(button.dataset.dayNav)));
+        });
         this.bindEventActions();
         if (horizontalLookAround || verticalLookAround)
             this.bindLookAround(preservedScrollPosition);

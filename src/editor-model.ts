@@ -27,6 +27,7 @@ export type EditorConfig = {
   look_around?: LookAroundConfig;
   fit_to_screen?: boolean;
   screen_margin?: number;
+  day_navigation?: boolean;
   show_now_line?: boolean;
   skip_days?: DayName[];
   max_simultaneous_events?: number;
@@ -116,6 +117,9 @@ export function validateEditorConfig(config: EditorConfig): string[] {
   if (config.fit_to_screen === true && config.height !== undefined && config.height !== null) {
     errors.push('Fit to screen cannot be combined with a fixed height.');
   }
+  if (config.day_navigation !== undefined && typeof config.day_navigation !== 'boolean') {
+    errors.push('Day navigation must be true or false.');
+  }
   if (config.screen_margin !== undefined && (!Number.isFinite(config.screen_margin) || config.screen_margin < 0)) {
     errors.push('Screen margin must be a non-negative number of pixels.');
   }
@@ -145,6 +149,10 @@ export function editorWarnings(config: EditorConfig): string[] {
   for (const [values, property] of [[labels, 'label'], [colors, 'color']] as const) {
     const duplicate = values.find((value, index) => values.indexOf(value) !== index);
     if (duplicate) warnings.push(`Two or more calendar sources use the ${property} ${property === 'label' ? `“${duplicate}”` : duplicate}.`);
+  }
+  const lookAroundMode = config.look_around?.mode;
+  if (config.day_navigation === true && (lookAroundMode === 'horizontal' || lookAroundMode === 'full')) {
+    warnings.push('Horizontal scrolling is switched off while the previous/next day buttons are shown.');
   }
   return warnings;
 }
